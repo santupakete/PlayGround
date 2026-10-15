@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MESSI vs CHIQUI TAPIA — Batalla Deltarune</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { background:#050505; height:100%; font-family:"Courier New",monospace; color:#fff;
+    display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  #wrap { display:flex; flex-direction:column; align-items:center; gap:10px; padding:12px; width:100%; max-width:1020px; }
+  #header { text-align:center; line-height:1.2; }
+  #header h1 { font-size:clamp(16px,2.6vw,26px); letter-spacing:2px; color:#fff; text-shadow:0 0 12px #58c4ff; }
+  #header h1 .messi { color:#7fd8ff; } #header h1 .vs { color:#ff5252; } #header h1 .chiqui { color:#ffd54a; }
+  #header p { font-size:12px; color:#aaa; margin-top:4px; letter-spacing:1px; }
+  #stage { position:relative; width:min(96vw,960px); aspect-ratio:960/640; background:#000;
+    border:3px solid #fff; border-radius:6px; box-shadow:0 0 0 3px #222, 0 0 40px rgba(88,196,255,.25); overflow:hidden; }
+  canvas { width:100%; height:100%; display:block; image-rendering:pixelated; background:#000; }
+  #stage::after { content:""; position:absolute; inset:0; pointer-events:none;
+    background:repeating-linear-gradient(0deg, rgba(255,255,255,.035) 0 1px, transparent 1px 3px); }
+  #controls { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; font-size:12px; color:#ddd; }
+  #controls span { background:#111; border:1px solid #444; border-radius:6px; padding:5px 10px; }
+  #controls b { color:#ffe082; }
+  #hint { font-size:12px; color:#888; text-align:center; }
+  button.mbtn { display:none; }
+  @media (max-width:600px){ #hint{display:none;} }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="header">
+    <h1><span class="messi">MESSI</span> <span class="vs">VS</span> <span class="chiqui">CHIQUI TAPIA</span></h1>
+    <p>★ BATALLA ESTILO DELTARUNE / UNDERTALE ★ — 2D · Desktop · Teclado</p>
+  </div>
+  <div id="stage"><canvas id="game" width="960" height="640"></canvas></div>
+  <div id="controls">
+    <span><b>←↑↓→ / WASD</b> mover alma</span>
+    <span><b>Z / Enter</b> confirmar</span>
+    <span><b>X / Shift</b> cancelar</span>
+    <span><b>R</b> reiniciar</span>
+    <span><b>M</b> sonido</span>
+  </div>
+  <div id="hint">Consejo: en LUCHAR, pulsa Z justo en el centro dorado para CRÍTICO. Usa ACTUAR para cansar al Chiqui y perdonarlo.</div>
+</div>
+<script>
+"use strict";
+/* ============================================================
+   MESSI vs CHIQUI TAPIA — batalla tipo Deltarune
+   Un solo archivo, sin assets externos. Canvas 2D + WebAudio.
+   ============================================================ */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+const W = 960, H = 640;
+
+// ---------- Audio (bleeps retro) ----------
+let AC = null, muted = false;
+function audio(){ if(!AC){ try{ AC = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } if(AC && AC.state==='suspended') AC.resume(); return AC; }
+function beep(freq=440,dur=0.07,type='square',vol=0.06,slide=0){
+  if(muted) return; const ac=audio(); if(!ac) return;
+  const o=ac.createOscillator(), g=ac.createGain();
+  o.type=type; o.frequency.setValueAtTime(freq,ac.currentTime);
+  if(slide) o.frequency.exponentialRampToValueAtTime(Math.max(30,freq+slide),ac.currentTime+dur);
+  g.gain.setValueAtTime(vol,ac.currentTime); g.gain.exponentialRampToValueAtTime(0.0001,ac.currentTime+dur);
+  o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime+dur);
+}
+const SFX = {
+  text(){ beep(660+Math.random()*80,0.03,'square',0.025); },
+  select(){ beep(520,0.07,'square',0.07); beep(780,0.09,'square',0.06); },
+  move(){ beep(300,0.04,'square',0.04); },
+  cancel(){ beep(220,0.08,'square',0.06); },
+  hit(){ beep(160,0.2,'sawtooth',0.12,-80); beep(90,0.25,'square',0.1); },
+  slash(){ beep(900,0.12,'sawtooth',0.09,-500); },
+  hurt(){ beep(140,0.25,'sawtooth',0.14,-60); },
+  heal(){ beep(523,0.12,'sine',0.09); setTimeout(()=>beep(659,0.12,'sine',0.09),110); setTimeout(()=>beep(784,0.18,'sine',0.09),220); },
+  spare(){ [523,659,784,1046].forEach((f,i)=>setTimeout(()=>beep(f,0.16,'triangle',0.09),i*120)); },
+  fanfare(){ [392,523,659,784,659,784,1046].forEach((f,i)=>setTimeout(()=>beep(f,0.15,'square',0.07),i*130)); },
+  whistle(){ beep(2300,0.35,'sine',0.07,400); }
+};
+
+// ---------- Estado global ----------
+const G = {
+  state:'title', // title,intro,menu,fightAim,fightAnim,actMenu,itemMenu,mercyMenu,enemyTalk,dodge,message,win,lose
+  t:0, shake:0, flash:0,
+  turn:1,
+  messi:{ hp:92, max:92, lv:1 },
+  boss:{ hp:650, max:650, spare:0, spareable:false, tired:false, checked:false },
+  items:[
+    {name:'Mate amargo', heal:22, qty:3, desc:'Cura 22 HP. Bien argentino.'},
+    {name:'Facturas', heal:12, qty:3, desc:'Cura 12 HP. De grasa.'},
+    {name:'Fernet con coca', heal:38, qty:1, desc:'Cura 38 HP. Córdoba style.'},
+    {name:'Botines mágicos', heal:55, qty:1, desc:'Cura 55 HP. Los del Mundial.'},
+  ],
+  menuIdx:0, subIdx:0,
+  text:'', textShown:'', textSpeed:1, textDone:false, textQueue:[], textCb:null,
+  dodge:{ x:W/2, y:440, t:0, dur:8, box:{x:W/2-170,y:360,w:340,h:170}, invuln:0, pattern:0, spawnT:0 },
+  bullets:[], particles:[],
+  fight:{ cursor:0, dir:1, result:0, animT:0, dmg:0 },
+  enemyBubble:'', enemyBubbleT:0,
+  bossY:0, bossHurt:0, slashX:0,
+  wonBy:'', victoryT:0,
+  introStep:0,
+};
+const MENU = ['LUCHAR','ACTUAR','OBJETO','PIEDAD'];
+const ACTS = [
+  {name:'Regatear', desc:'Gambeta corta inatajable.', spare:30},
+  {name:'Pared con Julián', desc:'Tiki-taka albiceleste.', spare:25},
+  {name:'Mateada', desc:'Lo invitás un amargo. Duda.', spare:22},
+  {name:'Revisar', desc:'Mirás al rival detenidamente.', spare:0},
+];
+const BOSS_TAUNTS = [
+  'CHIQUI TAPIA bloquea el camino!\n* Huele a papel sellado y a VAR.',
+  '* CHIQUI TAPIA infla el pecho.\n* "Acá se hace lo que digo yo, pibe."',
+  '* CHIQUI TAPIA saca un silbato de oro.\n* Suena a burocracia.',
+  '* CHIQUI TAPIA agita una pila de contratos.\n* "Firmame acá, firmame acá..."',
+  '* CHIQUI TAPIA llama al VAR.\n* Revisan tu gambeta del 2012.',
+  '* CHIQUI TAPIA arroja billetes!\n* "El fútbol argentino se defiende así."',
+];
+const SPARE_LINES = {
+  Regatear:'* Hiciste 3 bicicletas alrededor del Chiqui!\n* Se mareó. Sus papeles vuelan! (+SPARE)',
+  'Pared con Julián':'* Pared con la Araña! Tic-tac, pase y gol!\n* El Chiqui aplaude sin querer. (+SPARE)',
+  Mateada:'* Le cebaste un amargo al Chiqui.\n* "Está caliente..." — se ablanda! (+SPARE)',
+  Revisar:'* CHIQUI TAPIA — ATK 12 DEF 10.\n* Traje caro, silbato de oro.\n* Le tiembla el pulso cuando gambeteás.'
+};
+
+// ---------- Texto typewriter ----------
+function setText(str, cb=null){
+  G.text=str; G.textShown=''; G.textDone=false; G.textCb=cb; G.textSpeed=1;
+}
+function updateText(){
+  if(G.textDone) return;
+  const target=G.text.length;
+  const cur=G.textShown.length;
+  if(cur<target){
+    const step=2;
+    G.textShown=G.text.slice(0,cur+step);
+    if(G.textShown.length%3===0) SFX.text();
+    if(G.textShown.length>=target){ G.textDone=true; }
+  }
+}
+function confirmText(){
+  if(!G.textDone){ G.textShown=G.text; G.textDone=true; return false; }
+  return true;
+}
+
+// ---------- Input ----------
+const keys={};
+let pressedQueue=[];
+addEventListener('keydown', e=>{
+  const k=e.key.toLowerCase();
+  if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k)||[' ','arrowup','arrowdown','arrowleft','arrowright'].includes(e.key)) e.preventDefault();
+  if(e.repeat) return;
+  audio();
+  keys[e.key.toLowerCase()]=true;
+  handleKey(e.key.toLowerCase(), e);
+});
+addEventListener('keyup', e=>{ keys[e.key.toLowerCase()]=false; });
+canvas.addEventListener('click', e=>{
+  audio();
+  const r=canvas.getBoundingClientRect();
+  const mx=(e.clientX-r.left)/r.width*W, my=(e.clientY-r.top)/r.height*H;
+  handleClick(mx,my);
+});
+
+function handleKey(k, ev){
+  if(k==='m'){ muted=!muted; return; }
+  if(k==='r'){ if(G.state==='win'||G.state==='lose') resetGame(); return; }
+  const z = (k==='z'||k==='enter'||k===' ');
+  const x = (k==='x'||k==='shift');
+  if(G.state==='title'){ if(z) startIntro(); return; }
+  if(G.state==='win'||G.state==='lose'){ if(z) resetGame(); return; }
+  if(G.state==='menu'){
+    if(k==='arrowleft'||k==='a'){ G.menuIdx=(G.menuIdx+3)%4; SFX.move(); }
+    if(k==='arrowright'||k==='d'){ G.menuIdx=(G.menuIdx+1)%4; SFX.move(); }
+    if(z){ SFX.select(); openMenu(); }
+    return;
+  }
+  if(G.state==='actMenu'){
+    if(k==='arrowup'||k==='w'){ G.subIdx=(G.subIdx+ACTS.length-1)%ACTS.length; SFX.move(); }
+    if(k==='arrowdown'||k==='s'){ G.subIdx=(G.subIdx+1)%ACTS.length; SFX.move(); }
+    if(z){ doAct(G.subIdx); }
+    if(x){ SFX.cancel(); G.state='menu'; }
+    return;
+  }
+  if(G.state==='itemMenu'){
+    const avail=G.items;
+    if(k==='arrowup'||k==='w'){ G.subIdx=(G.subIdx+avail.length-1)%avail.length; SFX.move(); }
+    if(k==='arrowdown'||k==='s'){ G.subIdx=(G.subIdx+1)%avail.length; SFX.move(); }
+    if(z){ useItem(G.subIdx); }
+    if(x){ SFX.cancel(); G.state='menu'; }
+    return;
+  }
+  if(G.state==='mercyMenu'){
+    if(k==='arrowup'||k==='w'||k==='arrowdown'||k==='s'){ G.subIdx=(G.subIdx+1)%2; SFX.move(); }
+    if(z){ doMercy(G.subIdx); }
+    if(x){ SFX.cancel(); G.state='menu'; }
+    return;
+  }
+  if(G.state==='message'||G.state==='enemyTalk'){
+    if(z){ if(confirmText()){ /* avanza */ advanceAfterMessage(); } }
+    if(x){ if(G.textDone) advanceAfterMessage(); else {G.textShown=G.text;G.textDone=true;} }
+    return;
+  }
+  if(G.state==='fightAim'){ if(z){ resolveFightAim(); } return; }
+  if(G.state==='intro'){ if(z){ nextIntro(); } return; }
+}
+
+function handleClick(mx,my){
+  const z=true;
+  if(G.state==='title'){ startIntro(); return; }
+  if(G.state==='win'||G.state==='lose'){ resetGame(); return; }
+  if(G.state==='message'||G.state==='enemyTalk'){ if(confirmText()) advanceAfterMessage(); return; }
+  if(G.state==='intro'){ nextIntro(); return; }
+  if(G.state==='fightAim'){ resolveFightAim(); return; }
+  // botones menú
+  if(G.state==='menu'){
+    for(let i=0;i<4;i++){ const b=menuButtonRect(i); if(mx>b.x&&mx<b.x+b.w&&my>b.y&&my<b.y+b.h){ G.menuIdx=i; SFX.select(); openMenu(); return; } }
+    return;
+  }
+  if(G.state==='mercyMenu'||G.state==='actMenu'||G.state==='itemMenu'){ SFX.select(); advanceSubmenuClick(); return; }
+}
+
+function advanceSubmenuClick(){
+  if(G.state==='actMenu') doAct(G.subIdx);
+  else if(G.state==='itemMenu') useItem(G.subIdx);
+  else if(G.state==='mercyMenu') doMercy(G.subIdx);
+}
+
+// ---------- Flujo ----------
+function resetGame(){
+  G.messi.hp=92; G.boss.hp=650; G.boss.spare=0; G.boss.spareable=false; G.turn=1;
+  G.items=[{name:'Mate amargo',heal:22,qty:3,desc:'Cura 22 HP.'},{name:'Facturas',heal:12,qty:3,desc:'Cura 12 HP.'},{name:'Fernet con coca',heal:38,qty:1,desc:'Cura 38 HP.'},{name:'Botines mágicos',heal:55,qty:1,desc:'Cura 55 HP.'}];
+  G.bullets=[]; G.particles=[]; G.menuIdx=0; G.turn=1; G.state='menu';
+  setText('* CHIQUI TAPIA bloquea el camino!\n* Defiende la AFA con uñas y dientes.');
+  SFX.select();
+}
+function startIntro(){
+  G.state='intro'; G.introStep=0; SFX.fanfare();
+  setText('* Cancha neutral. Noche estrellada.\n* Un hombre de traje aparece entre humo...\n* [Z] continuar');
+}
+function nextIntro(){
+  if(!confirmText()) return;
+  G.introStep++;
+  SFX.select();
+  if(G.introStep===1) setText('* CHIQUI TAPIA: "Pibe, el fútbol es mío."\n* "Si querés jugar el Mundial, firmá acá."\n* [Z] continuar');
+  else if(G.introStep===2) setText('* MESSI ajusta su cinta de capitán.\n* "La pelota no se mancha."\n* ¡EMPIEZA LA BATALLA! [Z]');
+  else { G.state='menu'; setText(BOSS_TAUNTS[0]); }
+}
+function openMenu(){
+  G.subIdx=0;
+  if(G.menuIdx===0){ G.state='fightAim'; G.fight.cursor=0; G.fight.dir=1; }
+  else if(G.menuIdx===1){ G.state='actMenu'; }
+  else if(G.menuIdx===2){ G.state='itemMenu'; }
+  else if(G.menuIdx===3){ G.state='mercyMenu'; }
+}
+function doAct(i){
+  const a=ACTS[i]; SFX.select();
+  if(a.name==='Revisar'){ G.state='message'; setText(SPARE_LINES.Revisar, ()=>{}); G._after='enemyTurn'; return; }
+  G.boss.spare=Math.min(100,G.boss.spare+a.spare);
+  if(G.boss.spare>=100) G.boss.spareable=true;
+  burst(G.bossX(),170,'#ffe082',14);
+  SFX.spare();
+  G.state='message';
+  setText(SPARE_LINES[a.name]+'\n* SPARE: '+G.boss.spare+'%');
+  G._after='enemyTurn';
+}
+function useItem(i){
+  const it=G.items[i];
+  if(it.qty<=0){ SFX.cancel(); setText('* No te quedan '+it.name+'!'); G.state='message'; G._after='backMenu'; return; }
+  it.qty--; SFX.heal();
+  G.messi.hp=Math.min(G.messi.max,G.messi.hp+it.heal);
+  burst(150,500,'#7dff8a',16);
+  G.state='message';
+  setText('* Tomaste/comiste '+it.name+'!\n* Recuperaste '+it.heal+' HP. (MESSI '+G.messi.hp+'/'+G.messi.max+')');
+  G._after='enemyTurn';
+}
+function doMercy(i){
+  if(i===1){ SFX.cancel(); G.state='message'; setText('* Intentaste huir...\n* Pero el Chiqui cerró las puertas de la AFA!\n* No hay escape.'); G._after='enemyTurn'; return; }
+  if(G.boss.spareable){ winGame('spare'); }
+  else { SFX.cancel(); G.state='message'; setText('* Pediste clemencia... SPARE '+G.boss.spare+'%\n* CHIQUI: "Todavía no, pibe."\n* (Cansalo con ACTUAR hasta 100%)'); G._after='enemyTurn'; }
+}
+function advanceAfterMessage(){
+  const after=G._after||'enemyTurn';
+  G._after=null;
+  if(after==='backMenu'){ G.state='menu'; setText(pickTaunt()); return; }
+  if(after==='playerDead'){ loseGame(); return; }
+  // turno enemigo
+  enemyTurn();
+}
+function pickTaunt(){
+  if(G.boss.hp<G.boss.max*0.3) return '* CHIQUI TAPIA está acorralado!\n* "Llamen al VAR! Llamen a quien sea!"';
+  if(G.boss.spareable) return '* CHIQUI TAPIA duda...\n* Su nombre brilla en AMARILLO. Podés PERDONARLO.';
+  return BOSS_TAUNTS[Math.min(BOSS_TAUNTS.length-1, G.turn % BOSS_TAUNTS.length)];
+}
+
+// FIGHT aim
+function resolveFightAim(){
+  const c=G.fight.cursor; // 0..1
+  const dist=Math.abs(c-0.5)*2; // 0 centro, 1 borde
+  let dmg;
+  if(dist<0.08){ dmg=110+Math.floor(Math.random()*20); }
+  else if(dist<0.22){ dmg=80+Math.floor(Math.random()*20); }
+  else if(dist<0.4){ dmg=50+Math.floor(Math.random()*15); }
+  else { dmg=18+Math.floor(Math.random()*15); }
+  if(G.turn>4) dmg=Math.floor(dmg*1.15);
+  G.fight.dmg=dmg; G.fight.animT=0; G.state='fightAnim';
+  SFX.slash();
+}
+function applyFightDamage(){
+  G.boss.hp=Math.max(0,G.boss.hp-G.fight.dmg);
+  G.bossHurt=1; G.shake=12; G.flash=6;
+  SFX.hit();
+  burst(G.bossX(),170,'#ffffff',18);
+  burst(G.bossX(),170,'#ff5252',12);
+  if(G.boss.hp<=0){ winGame('fight'); return true; }
+  return false;
+}
+
+// Turno enemigo -> dodge
+function enemyTurn(){
+  G.turn++;
+  G.state='enemyTalk';
+  const line = G.boss.spareable ? '* CHIQUI: "Bueno... quizás sos el mejor..."\n* Pero aún lanza papeles!' :
+    ['* CHIQUI TAPIA prepara su ataque!\n* "Tomá, para vos: BUROCRACIA!"','* CHIQUI sopla el silbato!\n* El sonido aturde!','* CHIQUI invoca al VAR!\n* Las líneas del offside te persiguen!','* CHIQUI arroja su maletín!\n* Caen billetes filosos!'][G.turn%4];
+  G.enemyBubble = ['DÓLARES PARA TODOS!','VAR! VAAAR!','FIRMÁ ACÁ, PIBE!','TARJETA ROJA!'][G.turn%4];
+  G.enemyBubbleT=3;
+  SFX.whistle();
+  setText(line);
+  G._after='startDodge';
+  // hack: necesitamos segundo Z para entrar al dodge
+  const orig=advanceAfterMessage;
+}
+const _advanceAfterMessage = advanceAfterMessage;
+advanceAfterMessage = function(){
+  const after=G._after;
+  if(G.state==='enemyTalk' && after==='startDodge'){ G._after=null; startDodge(); return; }
+  _advanceAfterMessage();
+};
+
+function startDodge(){
+  G.state='dodge';
+  G.dodge.t=0;
+  G.dodge.dur = G.boss.hp<200 ? 9 : 7.5;
+  G.dodge.x=W/2; G.dodge.y=445; G.dodge.invuln=1;
+  G.bullets=[];
+  G.dodge.pattern = (G.turn-1)%3;
+  G.dodge.spawnT=0;
+  G.enemyBubbleT=2.5;
+}
+
+function endDodge(){
+  G.bullets=[];
+  G.state='menu';
+  setText(pickTaunt());
+}
+
+function winGame(how){
+  G.state='win'; G.wonBy=how; G.victoryT=0; SFX.fanfare(); SFX.spare();
+  for(let i=0;i<80;i++) burst(Math.random()*W,Math.random()*H*0.5,['#7fd8ff','#fff','#ffd54a'][i%3],1);
+}
+function loseGame(){ G.state='lose'; SFX.hurt(); G.shake=20; }
+
+// ---------- Partículas / balas ----------
+function burst(x,y,color,n){
+  for(let i=0;i<n;i++) G.particles.push({x,y,vx:(Math.random()-0.5)*320,vy:(Math.random()-0.5)*320-60,life:0.6+Math.random()*0.6,t:0,color,r:2+Math.random()*3});
+}
+function spawnBullets(dt){
+  const d=G.dodge; d.spawnT-=dt;
+  if(d.spawnT>0) return;
+  const enraged = G.boss.hp<G.boss.max*0.3;
+  if(d.pattern===0){ // billetes cayendo
+    d.spawnT = enraged?0.28:0.42;
+    const x=d.box.x+20+Math.random()*(d.box.w-40);
+    G.bullets.push({x,y:d.box.y-14,vx:(Math.random()-0.5)*60,vy:150+Math.random()*90+ G.turn*8,r:11,type:'bill',rot:Math.random()*6});
+    if(enraged) G.bullets.push({x:d.box.x+20+Math.random()*(d.box.w-40),y:d.box.y-14,vx:0,vy:200,r:11,type:'bill',rot:0});
+  } else if(d.pattern===1){ // tarjetas laterales + silbatos
+    d.spawnT = enraged?0.5:0.65;
+    const fromLeft=Math.random()<0.5;
+    G.bullets.push({x:fromLeft?d.box.x-14:d.box.x+d.box.w+14, y:d.box.y+20+Math.random()*(d.box.h-40),
+      vx:(fromLeft?1:-1)*(170+G.turn*10), vy:Math.sin(G.t*3)*40, r:10, type: Math.random()<0.5?'card':'whistle', rot:0});
+  } else { // contratos espiral + copas rebotando
+    d.spawnT = enraged?0.35:0.5;
+    const cx=d.box.x+d.box.w/2, cy=d.box.y-10;
+    const ang=Math.random()*Math.PI*2;
+    G.bullets.push({x:cx,y:cy,vx:Math.cos(ang)*130,vy:120+Math.random()*60,r:9,type: Math.random()<0.5?'contract':'cup',rot:Math.random()*6});
+  }
+}
+function updateBullets(dt){
+  const d=G.dodge;
+  for(const b of G.bullets){
+    b.x+=b.vx*dt; b.y+=b.vy*dt; b.rot+=dt*3;
+    if(b.type==='cup'){ // gravedad leve + rebote en caja
+      b.vy+=300*dt;
+      if(b.y>d.box.y+d.box.h-8){ b.y=d.box.y+d.box.h-8; b.vy*=-0.75; }
+      if(b.x<d.box.x+8||b.x>d.box.x+d.box.w-8) b.vx*=-1;
+    }
+    if(b.type==='contract'){ b.vx+=Math.sin(G.t*4+b.rot)*30*dt; }
+  }
+  // fuera de caja -> eliminar (con margen)
+  G.bullets=G.bullets.filter(b=>b.x>d.box.x-60&&b.x<d.box.x+d.box.w+60&&b.y>d.box.y-80&&b.y<d.box.y+d.box.h+60);
+  // colisión con alma
+  if(d.invuln>0) d.invuln-=dt;
+  for(const b of G.bullets){
+    const dx=b.x-d.x, dy=b.y-d.y;
+    const rr=b.r*0.62+6;
+    if(dx*dx+dy*dy<rr*rr && d.invuln<=0){
+      G.messi.hp-= (b.type==='cup'?12: b.type==='card'?10:9);
+      d.invuln=1.0; G.shake=8; SFX.hurt();
+      burst(d.x,d.y,'#ff5252',10);
+      b.dead=true;
+      if(G.messi.hp<=0){ G.messi.hp=0; G.state='message'; setText('* ...\n* Tu HP llegó a 0.'); G._after='playerDead'; G.bullets=[]; return; }
+    }
+  }
+  G.bullets=G.bullets.filter(b=>!b.dead);
+}
+
+// ---------- Dibujo pixel art ----------
+function px(x,y,w,h,c){ ctx.fillStyle=c; ctx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h)); }
+function bossX(){ return W/2 + Math.sin(G.t*1.6)*10; }
+function bossY(){ return 150 + Math.sin(G.t*2.2)*8; }
+
+function drawTapia(x,y,scale,hurt,spareable){
+  ctx.save(); ctx.translate(x,y); ctx.scale(scale,scale);
+  if(hurt>0 && Math.floor(G.t*20)%2===0) ctx.globalAlpha=0.5;
+  // sombra
+  ctx.fillStyle='rgba(0,0,0,.5)'; ctx.fillRect(-34,58,68,10);
+  // piernas / zapatos
+  px(-22,44,18,14,'#1a1a1a'); px(4,44,18,14,'#1a1a1a');
+  // pantalón
+  px(-24,28,48,18,'#2b2f6b');
+  // saco
+  const suit = spareable? '#3a5f4a' : '#33334d';
+  px(-30,0,60,30,suit); px(-30,0,60,6,'#22223a');
+  // camisa + corbata
+  px(-6,-2,12,24,'#fff'); px(-3,2,6,16,'#c62828');
+  // solapas
+  px(-30,0,12,20,'#22223a'); px(18,0,12,20,'#22223a');
+  // brazos: uno con silbato, otro con maletín
+  const wave=Math.sin(G.t*5)*4;
+  px(-42,6+wave,12,22,suit); px(-42,24+wave,12,8,'#e8b88a');
+  // silbato dorado
+  px(-46,30+wave,18,8,'#ffd54a'); px(-46,30+wave,4,8,'#8a6d00');
+  px(30,6-wave,12,22,suit); px(30,24-wave,12,8,'#e8b88a');
+  // maletín con $$
+  px(22,32-wave,34,22,'#5d4037'); px(22,32-wave,34,4,'#3e2723');
+  px(34,24-wave,10,10,'#5d4037');
+  ctx.fillStyle='#7dff8a'; ctx.font='8px monospace'; ctx.fillText('$$$',28,47-wave);
+  // cabeza
+  px(-20,-30,40,32,'#f0c8a0');
+  // pelo canoso costados
+  px(-22,-28,6,20,'#9e9e9e'); px(16,-28,6,20,'#9e9e9e');
+  px(-20,-32,40,6,'#4e342e'); // arriba poco pelo
+  // bigote
+  px(-12,-8,24,6,'#3e2723');
+  // ojos (enojados o dudosos)
+  if(spareable){ px(-14,-22,8,8,'#fff'); px(6,-22,8,8,'#fff'); px(-12,-19,4,4,'#000'); px(8,-19,4,4,'#000'); }
+  else { px(-14,-22,10,4,'#fff'); px(4,-22,10,4,'#fff'); px(-12,-21,6,3,'#000'); px(6,-21,6,3,'#000');
+    px(-16,-26,12,3,'#000'); px(4,-26,12,3,'#000'); }
+  // cejas enojo
+  // brillo traje
+  ctx.restore();
+  // barra HP jefe
+  const bw=420, bx=W/2-bw/2, by=56;
+  ctx.fillStyle='#400'; ctx.fillRect(bx-2,by-2,bw+4,16);
+  ctx.fillStyle='#222'; ctx.fillRect(bx,by,bw,12);
+  const p=G.boss.hp/G.boss.max;
+  ctx.fillStyle= p>0.5?'#7dff8a': p>0.25?'#ffd54a':'#ff5252';
+  ctx.fillRect(bx,by,bw*p,12);
+  ctx.fillStyle='#fff'; ctx.font='bold 13px monospace'; ctx.textAlign='center';
+  ctx.fillText('CHIQUI TAPIA  '+G.boss.hp+' / '+G.boss.max, W/2, by-8);
+  ctx.textAlign='left';
+  // spare bar
+  const sbw=220, sbx=W/2-sbw/2, sby=by+20;
+  ctx.fillStyle='#111'; ctx.fillRect(sbx-2,sby-2,sbw+4,12);
+  ctx.fillStyle='#333'; ctx.fillRect(sbx,sby,sbw,8);
+  ctx.fillStyle='#ffe082'; ctx.fillRect(sbx,sby,sbw*(G.boss.spare/100),8);
+  ctx.fillStyle= G.boss.spareable?'#ffe082':'#888';
+  ctx.font='11px monospace'; ctx.textAlign='center';
+  ctx.fillText(G.boss.spareable?'¡PERDONABLE! (PIEDAD)':'SPARE '+Math.floor(G.boss.spare)+'%', W/2, sby+20);
+  ctx.textAlign='left';
+}
+
+function drawMessiParty(x,y){
+  ctx.save(); ctx.translate(x,y);
+  const bob=Math.sin(G.t*3)*2;
+  ctx.translate(0,bob);
+  // sombra
+  ctx.fillStyle='rgba(0,0,0,.4)'; ctx.fillRect(-16,44,32,6);
+  px(-10,28,20,16,'#222'); // shorts negros
+  px(-10,40,8,6,'#fff'); px(2,40,8,6,'#fff');
+  // camiseta argentina
+  px(-14,8,28,22,'#fff');
+  px(-10,8,5,22,'#7fd8ff'); px(-1,8,5,22,'#7fd8ff'); px(8,8,5,22,'#7fd8ff');
+  px(-14,8,28,3,'#7fd8ff');
+  ctx.fillStyle='#000'; ctx.font='bold 10px monospace'; ctx.fillText('10',-5,24);
+  // brazos
+  px(-20,12,6,14,'#f0c8a0'); px(14,12,6,14,'#f0c8a0');
+  // cabeza + barba
+  px(-10,-8,20,16,'#f0c8a0');
+  px(-10,2,20,7,'#4e342e'); // barba
+  px(-10,-12,20,6,'#3e2723'); // pelo
+  px(-6,-2,4,4,'#000'); px(2,-2,4,4,'#000');
+  // cinta capitán
+  px(-18,16,5,6,'#7fd8ff');
+  // pelota
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(24,38,9,0,7); ctx.fill();
+  ctx.fillStyle='#000'; ctx.beginPath(); ctx.arc(24,38,3,0,7); ctx.fill();
+  ctx.restore();
+}
+
+function drawHeart(x,y,s=1,blink=false){
+  if(blink && Math.floor(G.t*12)%2===0) return;
+  ctx.save(); ctx.translate(x,y); ctx.scale(s,s);
+  ctx.fillStyle='#ff2222';
+  const p=[[-6,-2,-4,-2],[-2,-6,2,-2],[2,-6,6,-2],[ -8,0,-4,4],[-4,4,0,8],[0,8,4,4],[4,4,8,0]];
+  // corazón simple por rects
+  px(-8,-4,6,6,'#ff2222'); px(2,-4,6,6,'#ff2222');
+  px(-8,0,16,6,'#ff2222'); px(-4,6,8,4,'#ff2222'); px(-1,10,2,2,'#ff2222');
+  px(-8,-4,6,2,'#ff8888'); px(2,-4,6,2,'#ff8888');
+  ctx.restore();
+}
+
+function drawBullet(b){
+  ctx.save(); ctx.translate(b.x,b.y); ctx.rotate(b.rot*0.3);
+  if(b.type==='bill'){
+    px(-11,-7,22,14,'#7dff8a'); px(-11,-7,22,3,'#2e7d32'); px(-11,4,22,3,'#2e7d32');
+    ctx.fillStyle='#1b5e20'; ctx.font='bold 9px monospace'; ctx.textAlign='center'; ctx.fillText('$',0,4); ctx.textAlign='left';
+    px(-11,-7,2,14,'#fff'); px(9,-7,2,14,'#fff');
+  } else if(b.type==='card'){
+    px(-8,-11,16,22,'#d32f2f'); px(-8,-11,16,4,'#fff'); px(-6,-4,12,10,'#7b0000');
+  } else if(b.type==='whistle'){
+    px(-10,-5,20,10,'#ffd54a'); px(6,-3,8,6,'#8a6d00');
+    px(-10,-5,4,10,'#fff');
+    ctx.fillStyle='#000'; ctx.font='8px monospace'; ctx.fillText('~',-2,4);
+  } else if(b.type==='contract'){
+    px(-9,-12,18,24,'#fff8e1'); px(-9,-12,18,4,'#8d6e63');
+    ctx.fillStyle='#5d4037'; for(let i=0;i<3;i++) ctx.fillRect(-6,-4+i*6,12,2);
+    px(4,6,6,6,'#c62828');
+  } else if(b.type==='cup'){
+    px(-8,-10,16,16,'#ffd54a'); px(-11,-13,22,5,'#ffe082'); px(-5,6,10,4,'#8a6d00');
+    ctx.fillStyle='#fff'; ctx.font='8px monospace'; ctx.fillText('AFA',-8,2);
+  }
+  ctx.restore();
+}
+
+function menuButtonRect(i){
+  const bw=200, bh=52, gap=20;
+  const total=4*bw+3*gap, sx=(W-total)/2, y=H-88;
+  return {x:sx+i*(bw+gap), y, w:bw, h:bh};
+}
+function drawButtons(){
+  const icons=['⚔','✋','🎒','🕊'];
+  for(let i=0;i<4;i++){
+    const b=menuButtonRect(i);
+    const sel=(G.state==='menu'&&G.menuIdx===i);
+    ctx.fillStyle= sel?'#ffe082':'#111';
+    ctx.strokeStyle= sel?'#ffe082':'#fff';
+    ctx.lineWidth=3;
+    roundRect(b.x,b.y,b.w,b.h,8); ctx.fill(); ctx.stroke();
+    ctx.fillStyle= sel?'#000':'#fff';
+    ctx.font='bold 18px monospace'; ctx.textAlign='center';
+    ctx.fillText((sel?'▶ ':'')+MENU[i], b.x+b.w/2, b.y+33);
+    ctx.textAlign='left';
+  }
+}
+function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+function drawTextbox(y=350,h=140){
+  ctx.fillStyle='#000'; ctx.fillRect(36,y,W-72,h);
+  ctx.strokeStyle='#fff'; ctx.lineWidth=4; ctx.strokeRect(36,y,W-72,h);
+  ctx.fillStyle='#fff'; ctx.font='17px monospace';
+  const lines=G.textShown.split('\n');
+  lines.forEach((ln,i)=> ctx.fillText(ln,60,y+32+i*26));
+  if(G.textDone && (G.state==='message'||G.state==='enemyTalk'||G.state==='intro')) {
+    if(Math.floor(G.t*2)%2===0){ ctx.fillStyle='#ffe082'; ctx.fillText('▼',W-70,y+h-16); }
+  }
+}
+function drawStatus(){
+  // panel Messi
+  ctx.fillStyle='#000'; ctx.fillRect(36,H-160,W-72,56);
+  ctx.strokeStyle='#555'; ctx.lineWidth=2; ctx.strokeRect(36,H-160,W-72,56);
+  ctx.fillStyle='#fff'; ctx.font='bold 18px monospace';
+  ctx.fillText('MESSI   LV 1',60,H-126);
+  // HP bar
+  const hx=300, hw=320;
+  ctx.fillStyle='#7a0000'; ctx.fillRect(hx,H-142,hw,20);
+  ctx.fillStyle='#ffe14a'; ctx.fillRect(hx,H-142,hw*(G.messi.hp/G.messi.max),20);
+  ctx.fillStyle='#fff'; ctx.font='bold 16px monospace';
+  ctx.fillText('HP '+G.messi.hp+' / '+G.messi.max, hx+hw+14, H-126);
+  ctx.fillStyle='#888'; ctx.font='13px monospace';
+  ctx.fillText('TURNO '+G.turn+'  ·  Z confirmar · X volver', 640, H-126);
+}
+function drawDodgeBox(){
+  const b=G.dodge.box;
+  ctx.fillStyle='#000'; ctx.fillRect(b.x,b.y,b.w,b.h);
+  ctx.strokeStyle='#fff'; ctx.lineWidth=4; ctx.strokeRect(b.x,b.y,b.w,b.h);
+  // timer bar
+  const p=1-G.dodge.t/G.dodge.dur;
+  ctx.fillStyle='#222'; ctx.fillRect(b.x,b.y-12,b.w,6);
+  ctx.fillStyle='#7fd8ff'; ctx.fillRect(b.x,b.y-12,b.w*p,6);
+  for(const bl of G.bullets) drawBullet(bl);
+  drawHeart(G.dodge.x,G.dodge.y,1,G.dodge.invuln>0);
+  ctx.fillStyle='#aaa'; ctx.font='12px monospace'; ctx.textAlign='center';
+  ctx.fillText('¡ESQUIVÁ! mové con flechas / WASD',W/2,b.y+b.h+20);
+  ctx.textAlign='left';
+}
+function drawFightAim(){
+  const bx=110, bw=W-220, by=400, bh=60;
+  ctx.fillStyle='#000'; ctx.fillRect(36,350,W-72,140);
+  ctx.strokeStyle='#fff'; ctx.lineWidth=4; ctx.strokeRect(36,350,W-72,140);
+  ctx.fillStyle='#fff'; ctx.font='bold 15px monospace'; ctx.textAlign='center';
+  ctx.fillText('¡PULSA Z EN EL CENTRO DORADO PARA UN GOLAZO!',W/2,378);
+  ctx.textAlign='left';
+  ctx.fillStyle='#222'; ctx.fillRect(bx,by,bw,bh);
+  // zonas
+  ctx.fillStyle='#5a2a2a'; ctx.fillRect(bx,by,bw,bh);
+  ctx.fillStyle='#8a6d00'; ctx.fillRect(bx+bw*0.28,by,bw*0.44,bh);
+  ctx.fillStyle='#ffe082'; ctx.fillRect(bx+bw*0.42,by,bw*0.16,bh);
+  ctx.fillStyle='#fff'; ctx.fillRect(bx+bw*0.485,by,4,bh);
+  // cursor
+  const cx=bx+G.fight.cursor*bw;
+  ctx.fillStyle='#7fd8ff'; ctx.fillRect(cx-3,by-8,6,bh+16);
+  drawHeart(cx,by-16,0.9,false);
+  ctx.fillStyle='#aaa'; ctx.font='13px monospace'; ctx.textAlign='center';
+  ctx.fillText('Centro = CRÍTICO 110+ · Bordes = pase tibio',W/2,by+bh+24);
+  ctx.textAlign='left';
+}
+function drawFightAnim(){
+  const t=G.fight.animT;
+  ctx.fillStyle='#000'; ctx.fillRect(36,350,W-72,140);
+  ctx.strokeStyle='#fff'; ctx.lineWidth=4; ctx.strokeRect(36,350,W-72,140);
+  // messi patea
+  const mx=120+t*500;
+  ctx.save(); ctx.translate(mx,430);
+  px(-14,8,28,22,'#fff'); px(-10,8,5,22,'#7fd8ff'); px(0,8,5,22,'#7fd8ff');
+  px(-10,-8,20,16,'#f0c8a0'); px(-10,2,20,6,'#4e342e');
+  ctx.restore();
+  // slash
+  if(t<0.4){
+    ctx.strokeStyle='#fff'; ctx.lineWidth=6;
+    ctx.beginPath(); ctx.moveTo(G.bossX()-60,120+t*200); ctx.lineTo(G.bossX()+60,200-t*100); ctx.stroke();
+    ctx.strokeStyle='#ffe082'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(G.bossX()-50,130+t*200); ctx.lineTo(G.bossX()+50,210-t*100); ctx.stroke();
+  }
+  ctx.fillStyle='#fff'; ctx.font='bold 28px monospace'; ctx.textAlign='center';
+  if(t>0.25) ctx.fillText('-'+G.fight.dmg, G.bossX(), 110);
+  ctx.textAlign='left';
+}
+function drawSubmenu(){
+  const isAct=G.state==='actMenu', isItem=G.state==='itemMenu', isMercy=G.state==='mercyMenu';
+  ctx.fillStyle='#000'; ctx.fillRect(36,350,W-72,140);
+  ctx.strokeStyle='#fff'; ctx.lineWidth=4; ctx.strokeRect(36,350,W-72,140);
+  ctx.font='17px monospace';
+  if(isAct){
+    ACTS.forEach((a,i)=>{
+      const sel=G.subIdx===i;
+      ctx.fillStyle=sel?'#ffe082':'#fff';
+      ctx.fillText((sel?'▶ ':'  ')+a.name, 70, 385+i*26);
+    });
+    ctx.fillStyle='#888'; ctx.font='14px monospace';
+    ctx.fillText(ACTS[G.subIdx].desc, 380, 390);
+    ctx.fillText('SPARE +'+ACTS[G.subIdx].spare+'%', 380, 414);
+    ctx.fillText('X: volver', 380, 458);
+  } else if(isItem){
+    G.items.forEach((it,i)=>{
+      const sel=G.subIdx===i;
+      const empty=it.qty<=0;
+      ctx.fillStyle= empty?'#555': sel?'#7dff8a':'#fff';
+      ctx.fillText((sel?'▶ ':'  ')+it.name+' x'+it.qty+(empty?' (vacío)':''), 70, 385+i*26);
+    });
+    ctx.fillStyle='#888'; ctx.font='14px monospace';
+    const it=G.items[G.subIdx];
+    ctx.fillText('Cura '+it.heal+' HP. '+it.desc, 430, 400);
+    ctx.fillText('X: volver', 430, 458);
+  } else if(isMercy){
+    const opts=[G.boss.spareable?'Perdonar':'Perdonar ('+Math.floor(G.boss.spare)+'%)','Huir'];
+    opts.forEach((o,i)=>{
+      const sel=G.subIdx===i;
+      ctx.fillStyle= (i===0&&G.boss.spareable)?'#ffe082': sel?'#fff':'#aaa';
+      if(i===0&&G.boss.spareable&&Math.floor(G.t*3)%2===0) ctx.fillStyle='#fff200';
+      ctx.fillText((sel?'▶ ':'  ')+o, 70, 390+i*30);
+    });
+    ctx.fillStyle='#888'; ctx.font='14px monospace';
+    ctx.fillText(G.boss.spareable?'¡Su nombre brilla! ¡PERDONALO!':'Cansalo con ACTUAR para perdonar.', 430, 400);
+    ctx.fillText('Huir nunca funciona acá.', 430, 424);
+  }
+}
+
+// ---------- Pantallas ----------
+function drawTitle(){
+  ctx.fillStyle='#050510'; ctx.fillRect(0,0,W,H);
+  // estrellas
+  for(let i=0;i<90;i++){ const x=(i*137)%W, y=(i*89)%300; ctx.fillStyle=i%3?'#333':'#888'; ctx.fillRect(x,y,2,2); }
+  // cancha
+  ctx.strokeStyle='#1a5e20'; ctx.lineWidth=3;
+  ctx.strokeRect(60,330,W-120,220);
+  ctx.beginPath(); ctx.moveTo(W/2,330); ctx.lineTo(W/2,550); ctx.stroke();
+  ctx.beginPath(); ctx.arc(W/2,440,60,0,7); ctx.stroke();
+  drawTapia(W/2-120,190,1.5,0,false);
+  drawMessiParty(W/2+140,180);
+  // pelota vs maletín
+  ctx.fillStyle='#fff'; ctx.font='bold 64px monospace'; ctx.textAlign='center';
+  ctx.fillStyle='#7fd8ff'; ctx.fillText('MESSI',W/2-160,110);
+  ctx.fillStyle='#ff5252'; ctx.fillText('VS',W/2,110);
+  ctx.fillStyle='#ffd54a'; ctx.fillText('CHIQUI TAPIA',W/2+180,110);
+  ctx.fillStyle='#fff'; ctx.font='16px monospace';
+  ctx.fillText('— BATALLA ESTILO DELTARUNE —',W/2,140);
+  ctx.fillStyle='#888'; ctx.font='14px monospace';
+  ctx.fillText('Un fangame de comedia futbolera. Parodia sin afiliación.',W/2,320);
+  if(Math.floor(G.t*1.6)%2===0){
+    ctx.fillStyle='#ffe082'; ctx.font='bold 22px monospace';
+    ctx.fillText('PULSA  Z  PARA EMPEZAR',W/2,590);
+  }
+  ctx.fillStyle='#666'; ctx.font='13px monospace';
+  ctx.fillText('Flechas/WASD + Z/X · Desktop · Sonido con M',W/2,614);
+  ctx.textAlign='left';
+}
+function drawWin(){
+  ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
+  for(let i=0;i<60;i++){ ctx.fillStyle=['#7fd8ff','#ffd54a','#fff'][i%3]; ctx.fillRect(Math.random()*W,Math.random()*H,3,3); }
+  drawMessiParty(W/2,220);
+  ctx.textAlign='center';
+  ctx.fillStyle='#ffe082'; ctx.font='bold 44px monospace';
+  ctx.fillText('¡VICTORIA!',W/2,120);
+  ctx.fillStyle='#fff'; ctx.font='17px monospace';
+  if(G.wonBy==='fight'){
+    ctx.fillText('¡GOOOL! ¡Messi gambeteó a la burocracia!',W/2,380);
+    ctx.fillText('CHIQUI TAPIA fue noqueado con un golazo.',W/2,406);
+    ctx.fillText('La copa vuelve al pueblo. El VAR no pudo hacer nada.',W/2,432);
+  } else {
+    ctx.fillText('¡PERDONADO! El Chiqui sonríe y guarda el silbato.',W/2,380);
+    ctx.fillText('"Está bien pibe... jugá el Mundial. Yo invito los mates."',W/2,406);
+    ctx.fillText('Ganaste por el camino PACIFISTA. Sos Gardel.',W/2,432);
+  }
+  ctx.fillStyle='#7dff8a'; ctx.font='bold 16px monospace';
+  ctx.fillText('Turnos: '+G.turn+' · HP restante: '+G.messi.hp+' · Pulsa Z o R para jugar de nuevo',W/2,500);
+  ctx.textAlign='left';
+}
+function drawLose(){
+  ctx.fillStyle='#100000'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  ctx.fillStyle='#ff5252'; ctx.font='bold 52px monospace';
+  ctx.fillText('GAME OVER',W/2,220);
+  ctx.fillStyle='#fff'; ctx.font='17px monospace';
+  ctx.fillText('El Chiqui te mostró la roja y te desafilió...',W/2,300);
+  ctx.fillText('"Volvé cuando tengas los papeles al día, pibe."',W/2,326);
+  ctx.fillText('Messi cayó, pero la Scaloneta nunca se rinde.',W/2,352);
+  if(Math.floor(G.t*1.6)%2===0){
+    ctx.fillStyle='#ffe082'; ctx.font='bold 20px monospace';
+    ctx.fillText('Pulsa R o Z para REVANCHA',W/2,430);
+  }
+  ctx.textAlign='left';
+}
+
+// ---------- Loop ----------
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(0.033,(now-last)/1000); last=now;
+  G.t+=dt;
+  if(G.shake>0) G.shake-=dt*40;
+  if(G.flash>0) G.flash-=dt*20;
+  if(G.bossHurt>0) G.bossHurt-=dt*3;
+  updateText();
+  update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+function update(dt){
+  // partículas
+  for(const p of G.particles){ p.t+=dt; p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=400*dt; }
+  G.particles=G.particles.filter(p=>p.t<p.life);
+  if(G.enemyBubbleT>0) G.enemyBubbleT-=dt;
+
+  if(G.state==='fightAim'){
+    G.fight.cursor+=G.fight.dir*dt*1.4;
+    if(G.fight.cursor>1){G.fight.cursor=1;G.fight.dir=-1;}
+    if(G.fight.cursor<0){G.fight.cursor=0;G.fight.dir=1;}
+  }
+  if(G.state==='fightAnim'){
+    G.fight.animT+=dt;
+    if(G.fight.animT>0.15 && !G.fight.applied){ G.fight.applied=true; if(applyFightDamage()) return; }
+    if(G.fight.animT>1.1){ G.fight.applied=false; enemyTurn(); }
+  }
+  if(G.state==='dodge'){
+    G.dodge.t+=dt;
+    // movimiento alma
+    const sp=250;
+    let mx=0,my=0;
+    if(keys['arrowleft']||keys['a']) mx-=1;
+    if(keys['arrowright']||keys['d']) mx+=1;
+    if(keys['arrowup']||keys['w']) my-=1;
+    if(keys['arrowdown']||keys['s']) my+=1;
+    if(mx&&my){ mx*=0.707; my*=0.707; }
+    const b=G.dodge.box;
+    G.dodge.x=Math.max(b.x+10,Math.min(b.x+b.w-10,G.dodge.x+mx*sp*dt));
+    G.dodge.y=Math.max(b.y+10,Math.min(b.y+b.h-10,G.dodge.y+my*sp*dt));
+    spawnBullets(dt);
+    updateBullets(dt);
+    if(G.state!=='dodge') return; // murió en updateBullets
+    if(G.dodge.t>=G.dodge.dur) endDodge();
+  }
+  if(G.state==='win') G.victoryT+=dt;
+}
+function render(){
+  ctx.save();
+  if(G.shake>0) ctx.translate((Math.random()-0.5)*G.shake,(Math.random()-0.5)*G.shake);
+  ctx.fillStyle='#000'; ctx.fillRect(-20,-20,W+40,H+40);
+
+  if(G.state==='title'){ drawTitle(); ctx.restore(); return; }
+  if(G.state==='win'){ drawWin(); ctx.restore(); return; }
+  if(G.state==='lose'){ drawLose(); ctx.restore(); return; }
+
+  // fondo batalla
+  const grd=ctx.createLinearGradient(0,0,0,340);
+  grd.addColorStop(0,'#0a0a18'); grd.addColorStop(1,'#000');
+  ctx.fillStyle=grd; ctx.fillRect(0,0,W,340);
+  // estrellas / estadio
+  for(let i=0;i<70;i++){ const x=(i*173)%W, y=(i*97)%260+20; ctx.fillStyle=i%4?'#222':'#555'; ctx.fillRect(x,y,2,2); }
+  ctx.strokeStyle='#1b5e20'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,300); ctx.lineTo(W,300); ctx.stroke();
+  for(let i=0;i<12;i++){ ctx.fillStyle='#0e3a14'; ctx.fillRect(i*80,302,40,38); }
+
+  // jefe + globo
+  drawTapia(bossX(),bossY(),1.6,G.bossHurt,G.boss.spareable);
+  if(G.enemyBubbleT>0 && G.enemyBubble){
+    ctx.fillStyle='#fff'; ctx.strokeStyle='#000'; ctx.lineWidth=2;
+    const bw2=ctx.measureText(G.enemyBubble).width+40;
+    roundRect(bossX()+70,80,bw2,34,8); ctx.fill(); ctx.stroke();
+    ctx.fillStyle='#000'; ctx.font='bold 15px monospace';
+    ctx.fillText(G.enemyBubble,bossX()+90,103);
+  }
+  // mini messi en esquina
+  drawMessiParty(110,220);
+
+  // flash daño
+  if(G.flash>0){ ctx.fillStyle='rgba(255,255,255,'+Math.min(0.5,G.flash*0.15)+')'; ctx.fillRect(0,0,W,H); }
+
+  // zona inferior según estado
+  if(G.state==='dodge'){ drawTextbox(350,140); /* texto mini arriba? */ drawDodgeBox(); }
+  else if(G.state==='fightAim'){ drawFightAim(); }
+  else if(G.state==='fightAnim'){ drawFightAnim(); }
+  else if(G.state==='actMenu'||G.state==='itemMenu'||G.state==='mercyMenu'){ drawSubmenu(); }
+  else { drawTextbox(350,140); }
+
+  // partículas encima
+  for(const p of G.particles){ ctx.globalAlpha=1-p.t/p.life; ctx.fillStyle=p.color; ctx.fillRect(p.x,p.y,p.r,p.r); }
+  ctx.globalAlpha=1;
+
+  drawStatus();
+  if(G.state!=='dodge') drawButtons();
+
+  // soul en menú
+  if(G.state==='menu'){
+    const b=menuButtonRect(G.menuIdx);
+    drawHeart(b.x-6,b.y+b.h/2,0.9,false);
+  }
+  if(G.state==='actMenu'||G.state==='itemMenu'||G.state==='mercyMenu'){
+    drawHeart(52,376+G.subIdx*(G.state==='mercyMenu'?30:26),0.8,false);
+  }
+  ctx.restore();
+}
+
+// init
+setText(BOSS_TAUNTS[0]);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
